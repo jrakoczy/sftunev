@@ -1,19 +1,32 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-from tunnel import SFTunnel
 import numpy as np
 import sys
+import utils
+from datasources import FDSDataSource
+from utils import Segment
 
 
 class Agent(object):
 
-    def __init__(self, **kwargs):
+    """ Generic class representing an evacuee. 
+    """
 
+    def __init__(self, **kwargs):
+        """ Agent constructor. 
+
+        Params: tunnel, position, simulation.
+        """
+
+        self._alive = True
         self._tunnel = kwargs['tunnel']
         self._position = np.array(kwargs['position'])
-        self._dest = np.array(kwargs['destination'])
-        self._simulation = kwargs['_simulation']
+        self._simulation = kwargs['simulation']
+
+    @property
+    def alive(self):
+        return self._alive
 
     @property
     def position(self):
@@ -24,40 +37,63 @@ class Agent(object):
         return self._tunnel
 
     @property
-    def dest(self):
-        return self._dest
+    def simulation(self):
+        return self._simulation
 
 
 class SFAgent(Agent):
 
-    TIME_STEP = 0.1  # [s]
-    CHECKPOINT_GAP = 15
-    CHECKPOINT_TOL = 30
+    DEST_GAP = 1.5
+    CHECKPOINT_GAP = 1.5
+    CHECKPOINT_TOL = 1.5
+
+    CO_MAX = 50000
+    TEMP_MAX = 80
+
+    FS_DIST_COEFF = 0.1
 
     def __init__(self, **kwargs):
+        """ SFAgent constructor. 
+
+        Finds the nearest checkpoint and the nearest exit.
+        Params: tunnel, position, simulation, radius, assumed_speed,
+        max_speed, velocity.
+        """
+
         super().__init__(tunnel=kwargs['tunnel'],
                          position=kwargs['position'],
-                         destination=kwargs['destination'],
                          simulation=kwargs['simulation'])
 
         self._initial_position = self._position
+        self._dest = None
+        self._nearest_end = None
+        self._checkpoint = None
+
+        self.set_dest()
+        self._find_nearest_end()
+        self._find_checkpoint()
+
         self._time = 0.0
+        self._reaction_time = 0.0
+        self._calculate_reaction_time(kwargs['reaction_time'])
         self._radius = kwargs['radius']
 
         self._motivation = SFAgent.Motivation(self)
-        #TODO motility and motiv in constr
-        self._motility = SFAgent.Motility(agent=self,
-                assumed_speed=kwargs['assumed_speed'],
-                max_speed=kwargs['max_speed'],
-                velocity=kwargs['velocity'])
 
-        self._nearest_end = None
-        self._nearest_end = self._find_nearest_end()
-        self._checkpoint = self._find_checkpoint(self._nearest_end)
+        # TODO motility and motiv in constr
+
+        self._motility = SFAgent.Motility(agent=self,
+                walk_speed=kwargs['walk_speed'],
+                velocity=kwargs['velocity'],
+                run_speed=kwargs['run_speed'])
 
     @property
     def initial_position(self):
         return self._initial_position
+
+    @property
+    def dest(self):
+        return self._dest
 
     @property
     def checkpoint(self):
@@ -84,33 +120,97 @@ class SFAgent(Agent):
         Move of an agent with particular velocity in given time step.
         """
 
-        new_position = self.position + self.motility.velocity \
-            * self.tunnel.time_step
-        self._position = new_position
+        if self._alive and self._reaction_time \
+            < self._simulation.current_time:
+            self._position = self.position + self.motility.velocity \
+                * self._simulation.time_step
 
     def update(self):
-        self._set_checkpoint()
-        self.motility.update_velocity()
-        self._time += self.tunnel.time_step
+        self._check_if_alive()
+
+        if self._alive and self._reaction_time \
+            < self._simulation.current_time:
+            self._set_checkpoint()
+            self.motility.update_velocity()
+            self._time += self._simulation.time_step
+
+    def _check_if_alive(self):
+        current_time = self._simulation.current_time
+
+        co_density = \
+            self._tunnel.get_phys_at(FDSDataSource.CO_FNAME_KEY,
+                current_time, self._position)
+        temp = self._tunnel.get_phys_at(FDSDataSource.TEMP_FNAME_KEY,
+                current_time, self._position)
+
+        if co_density > self.CO_MAX or temp > self.TEMP_MAX:
+            self._alive = False
+
+    def _calculate_reaction_time(self, reaction_time):
+        nearest_src = utils.find_nearest_segment(self._position,
+                self._tunnel.fire_sources)
+        src_mid = nearest_src.start + utils.vmiddle(nearest_src.end
+                - nearest_src.start)
+        dist = utils.vlen(src_mid - self._position)
+        self._reaction_time = self.FS_DIST_COEFF * dist + reaction_time
+
+    def set_dest(self):
+        exits = self._tunnel.exits[:]
+        dest = None
+
+        while dest is None and len(exits) > 0:
+            nearest_exit = utils.find_nearest_segment(self._position,
+                    exits)
+
+            exit_dest = nearest_exit.start \
+                + utils.vmiddle(nearest_exit.end - nearest_exit.start)
+
+            if self._check_exit_blockage(exit_dest):
+                exits.remove(nearest_exit)
+            else:
+                dest = exit_dest
+
+        if len(exits) == 0 and dest is None:
+            nearest_exit = utils.find_nearest_segment(self._position,
+                    self._tunnel.exits)
+
+            dest = nearest_exit.start + utils.vmiddle(nearest_exit.end
+                    - nearest_exit.start)
+
+        dest_vec = utils.vnormalize(dest - self._position)
+        self._dest = dest + dest_vec * self.DEST_GAP
+        self._find_nearest_end()
+        self._find_checkpoint()
+
+    def _check_exit_blockage(self, exit_dest):
+        dest_segment = Segment(self._position, exit_dest)
+
+        for blockage in self._tunnel.temp_blockages:
+            if utils.check_segments_intersect(blockage, dest_segment):
+                return True
+
+        return False
 
     def _set_checkpoint(self):
-        if self.checkpoint is not None and vlen(self.checkpoint
-                - self.position) < self.CHECKPOINT_TOL:
+        if self._checkpoint is not None and utils.vlen(self._checkpoint
+                - self.position) < self.CHECKPOINT_TOL \
+            or self._checkpoint is None:
 
-            self._nearest_end = self._find_nearest_end()
-            self._checkpoint = self._find_checkpoint(self._nearest_end)
+            self._find_nearest_end()
+            self._find_checkpoint()
 
-    def _find_checkpoint(self, end):
-        if end is None:
+    def _find_checkpoint(self):
+        if self._nearest_end is None:
             return None
 
-        end_vector = end - self.position
-        end_dir = vnormalize(end_vector)
-        return end + self.CHECKPOINT_GAP * end_dir
+        end_vector = self._nearest_end - self.position
+        end_dir = utils.vnormalize(end_vector)
+        self._checkpoint = self._nearest_end + self.CHECKPOINT_GAP \
+            * end_dir
 
     def _find_nearest_end(self):
 
-        dest_segment = SFTunnel.Segment(self.position, self.dest)
+        dest_segment = Segment(self.position, self.dest)
         lowest_dist = sys.maxsize
         nearest_end = None
 
@@ -120,17 +220,17 @@ class SFAgent(Agent):
             current_end = self._nearest_end
 
         for segment in self.tunnel.segments:
-            if check_segments_intersect(dest_segment.start,
-                    dest_segment.end, segment.start, segment.end):
+            if utils.check_segments_intersect(dest_segment, segment):
 
-                (dist, end) = get_closer_end(self.position,
-                        segment.start, segment.end)
+                #   ! TODO ! - closest instead of nearest_end
+                (dist, end) = utils.get_closer_end(self._position,
+                        segment)
 
                 if dist < lowest_dist and (end != current_end).all():
                     lowest_dist = dist
-                    nearest_end = end
+                    (_ , nearest_end)= utils.get_closer_end(self._dest, segment)
 
-        return nearest_end
+        self._nearest_end = nearest_end
 
     # ----------------------------------------------------
     # Motivation (inner class)
@@ -140,14 +240,14 @@ class SFAgent(Agent):
 
         RELAXATION_TIME = 1  # [s]
         ANGLE_COEFF = 0.75
-        DEST_FORCE_COEFF = 5
-        SOCIAL_REP_COEFF = 1  # 1
-        SOCIAL_DIST_COEFF = 30  # 40
-        WALL_REP_COEFF = 100  # 100
-        WALL_DIST_REP = 350  # 450
-        MAX_FORCE_VAL = 5  # 5
-
-        SOCIAL_DIST_TOL = 50
+        DEST_FORCE_COEFF = 1
+        SOCIAL_REP_COEFF = 3  # 1 (3)
+        SOCIAL_DIST_COEFF = 0.5  # 40
+        WALL_REP_COEFF = 5  #10  100 (50)
+        WALL_DIST_REP = 1.5  # 450
+        SOCIAL_DIST_TOL = 5
+        WALL_DIST_TOL = 2.0
+        WALL_REP_MAX = 1
 
         def __init__(self, agent):
             self._agent = agent
@@ -159,15 +259,12 @@ class SFAgent(Agent):
                 * self._calculate_destination_force()
             social_rep = self.SOCIAL_REP_COEFF \
                 * self._calculate_social_repulsion(tunnel.agents)
-            wall_rep = self.WALL_REP_COEFF \
+            wall_rep = self.WALL_REP_COEFF / self._agent.radius \
                 * self._calculate_wall_repulsion(tunnel.segments)
 
             total_force = dest_force - social_rep - wall_rep
 
-            if vlen(total_force) > self.MAX_FORCE_VAL:
-                return self.MAX_FORCE_VAL * vnormalize(total_force)
-            else:
-                return total_force
+            return total_force
 
         # ----------------------------------------------------
         # destination component methods
@@ -197,7 +294,7 @@ class SFAgent(Agent):
                 destination = self._agent.dest
 
             dest_vector = destination - self._agent.position
-            return vnormalize(dest_vector)
+            return utils.vnormalize(dest_vector)
 
         def _calculate_desired_speed(self):
             """
@@ -231,8 +328,9 @@ class SFAgent(Agent):
             total_force = np.array([0, 0])
 
             for agent in agents:
-                if agent != self and vlen(agent.position
+                if agent != self._agent and utils.vlen(agent.position
                         - self._agent.position) < self.SOCIAL_DIST_TOL:
+
                     angle_coeff = self._calculate_angle_coeff(agent)
                     rep_potential = \
                         self._calculate_soc_rep_potential(agent)
@@ -244,13 +342,13 @@ class SFAgent(Agent):
         def _calculate_soc_rep_potential(self, agent):
 
             target_vector = agent.position - self._agent.position
-            dist = vlen(target_vector)
-            target_dir = vnormalize(target_vector)
+            dist = utils.vlen(target_vector)
+            target_dir = utils.vnormalize(target_vector)
             target_dir = self._rotate_direction_vetor(target_dir,
                     agent.position)
 
-            return np.exp(self.SOCIAL_DIST_COEFF + agent.radius
-                          + self._agent.radius - dist) * target_dir
+            return np.exp(agent.radius + self._agent.radius - dist
+                          / self.SOCIAL_DIST_COEFF) * target_dir
 
         def _calculate_angle_coeff(self, agent):
             angle = self._calculate_target_angle(agent.position)
@@ -265,26 +363,44 @@ class SFAgent(Agent):
 
         def _calculate_wall_repulsion(self, segments):
             total_force = np.array([0, 0])
+            end_points = None
 
             for segment in segments:
-                rep_potential = \
-                    self._calculate_wall_rep_potential(segment)
+                closest = \
+                    utils.closest_on_segment(self._agent.position,
+                        segment)
+
+                if utils.vlen(closest - self._agent.position) \
+                    > self.WALL_DIST_TOL:
+                    continue
+
+                rep_potential = np.array([0, 0])
+
+                if end_points is None:
+                    rep_potential = \
+                        self._calculate_wall_rep_potential(closest)
+                    end_points = np.array(closest)
+                elif not utils.check_point_repetition(closest,
+                        end_points):
+
+                    rep_potential = \
+                        self._calculate_wall_rep_potential(closest)
+                    end_points = np.vstack([end_points, closest])
+
                 total_force = total_force + rep_potential
 
             return total_force
 
-        def _calculate_wall_rep_potential(self, segment):
-            closest = closest_on_segment(self._agent.position,
-                    segment.start, segment.end)
+        def _calculate_wall_rep_potential(self, closest):
+
             target_vector = closest - self._agent.position
-            dist = vlen(target_vector)
-            target_dir = vnormalize(target_vector)
+            dist = utils.vlen(target_vector)
+            target_dir = utils.vnormalize(target_vector)
 
-            # target_dir = self._rotate_direction_vetor(target_dir,
-             #       closest)
+            target_dir = self._rotate_direction_vetor(target_dir,
+                    closest)
 
-            return np.exp(-dist + self.WALL_DIST_REP
-                          / self._agent.radius) * target_dir
+            return np.exp(-dist / self._agent.radius) * target_dir
 
         # ----------------------------------------------------
         # others
@@ -293,7 +409,7 @@ class SFAgent(Agent):
             motility = self._agent.motility
 
             target_vector = target - self._agent.position
-            return vangle(motility.velocity, target_vector)
+            return utils.vangle(motility.velocity, target_vector)
 
         def _rotate_direction_vetor(self, direction, target):
             angle = self._calculate_target_angle(target)
@@ -302,7 +418,7 @@ class SFAgent(Agent):
 
             cos_angle = np.cos(angle)
             rot_angle = (cos_angle * np.pi / 4 if cos_angle > 0 else 0)
-            return vrotate(direction, rot_angle)
+            return utils.vrotate(direction, rot_angle)
 
     # ----------------------------------------------------
     # Motility (inner class)
@@ -310,10 +426,14 @@ class SFAgent(Agent):
 
     class Motility:
 
+        MAX_SPEED_COEFF = 1.3
+
         def __init__(self, **kwargs):
 
-            self._assumed_speed = kwargs['assumed_speed']
-            self._max_speed = kwargs['max_speed']
+            self._walk_speed = kwargs['walk_speed']
+            self._assumed_speed = self._walk_speed
+            self._max_speed = self.MAX_SPEED_COEFF * self._assumed_speed
+            self._run_speed = kwargs['run_speed']
             self._velocity = np.array(kwargs['velocity'])
             self._agent = kwargs['agent']
             self._motivation = self._agent.motivation
@@ -337,20 +457,31 @@ class SFAgent(Agent):
 
             pos = self._agent.position - self._agent.initial_position
             dest = self._agent.dest - self._agent.initial_position
-            proj_dist = vproject(pos, dest)
+            proj_dist = utils.vproject(pos, dest)
             if self._agent.time == 0:
-                avg_speed = vlen(self.velocity)
+                avg_speed = utils.vlen(self.velocity)
             else:
-                avg_speed = vlen(proj_dist) / self._agent.time
+                avg_speed = utils.vlen(proj_dist) / self._agent.time
 
             return avg_speed
 
         def update_velocity(self):
-            tunnel = self._agent.tunnel
+            simulation = self._agent.simulation
             motivation = self._agent.motivation
+            tunnel = self._agent.tunnel
+            temp = tunnel.get_phys_at(FDSDataSource.TEMP_FNAME_KEY,
+                    simulation.current_time, self._agent.position)
 
-            acc_vel_element = motivation.calculate_resultant() \
-                * tunnel.time_step
+            if temp > SFAgent.TEMP_MAX / 2:
+                self._assumed_speed = self._run_speed
+            else:
+                self._assumed_speed = self._walk_speed
+
+            self._max_speed = self.MAX_SPEED_COEFF * self._assumed_speed
+
+            acc_vel_element = self._assumed_speed / self._walk_speed \
+                * motivation.calculate_resultant() \
+                * simulation.time_step
             self._velocity = self._velocity + acc_vel_element
 
     # ----------------------------------------------------
@@ -360,141 +491,3 @@ class SFAgent(Agent):
     class Cognition:
 
         pass
-
-
-# ----------------------------------------------------
-
-def vlensq(v):
-    v = np.array(v)
-    return np.vdot(v, v)
-
-
-def vlen(v):
-    v = np.array(v)
-    return np.sqrt(vlensq(v))
-
-
-def vnormalize(v):
-    v = np.array(v)
-    length = vlen(v)
-    if length != 0:
-        return v / length
-    else:
-        return v
-
-
-def vproject(v1, v2):
-    """ project a onto b
-
-    formula: b(dot(a,b)/(|b|^2))
-    """
-
-    v1 = np.array(v1)
-    v2 = np.array(v2)
-
-    if (v1 != v2).any():
-        dot_product = np.vdot(v1, v2)
-        lensq = vlensq(v2)
-        temp = float(dot_product) / float(lensq)
-        c = temp * v2
-    else:
-        c = np.array([0, 0])  # TODO
-
-    return c
-
-
-def vangle(v1, v2):
-    u1 = vnormalize(v1)
-    u2 = vnormalize(v2)
-    dot_product = np.vdot(u1, u2)
-    angle = np.arccos(dot_product)
-
-    if np.isnan(angle):
-        if (u1 == u2).all():
-            return 0.0
-        else:
-            return np.pi
-
-    return angle
-
-
-def vrotate(v, angle):
-
-    a_cos = np.cos(angle)
-    a_sin = np.sin(angle)
-    x = v[0] * a_cos - v[1] * a_sin
-    y = v[1] * a_cos + v[0] * a_sin
-
-    return np.array([x, y])
-
-
-def closest_on_segment(p, start, end):
-
-    p = np.array(p)
-    start = np.array(start)
-    end = np.array(end)
-
-    # segment length
-
-    seg_len = vlen(end - start)
-
-    # in case the segment points are equal
-
-    if seg_len < 0.00000001:
-        return end
-
-    u1 = (p[0] - start[0]) * (end[0] - start[0]) + (p[1] - start[1]) \
-        * (end[1] - start[1])
-    u = u1 / (seg_len * seg_len)
-
-    # in case that one of end points is the closest
-
-    if u < 0.00001 or u > 1:
-        dist_to_start = vlen(start - p)
-        dist_to_end = vlen(end - p)
-
-        if dist_to_start > dist_to_end:
-            closest = end
-        else:
-            closest = start
-    else:
-
-    # closest point lays between start and end
-
-        ix = start[0] + u * (end[0] - start[0])
-        iy = start[1] + u * (end[1] - start[1])
-        closest = np.array([ix, iy])
-
-    return closest
-
-
-def check_points_ccw(px, py, pz):
-    px = np.array(px)
-    py = np.array(py)
-    pz = np.array(pz)
-
-    return (pz[1] - px[1]) * (py[0] - px[0]) > (py[1] - px[1]) * (pz[0]
-            - px[0])
-
-
-def check_segments_intersect(
-    start1,
-    end1,
-    start2,
-    end2,
-    ):
-
-    return check_points_ccw(start1, start2, end2) \
-        != check_points_ccw(end1, start1, end2) \
-        and check_points_ccw(start1, end1, start2) \
-        != check_points_ccw(start1, end1, end2)
-
-
-def get_closer_end(p, start, end):
-    start_dist = vlen(start - p)
-    end_dist = vlen(end - p)
-
-    if start_dist < end_dist:
-        return (start_dist, start)
-    else:
-        return (end_dist, end)

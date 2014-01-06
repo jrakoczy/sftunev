@@ -6,6 +6,7 @@ import pygame.gfxdraw
 from tunnel import SFTunnel
 from agent import SFAgent
 from pygame.locals import QUIT
+from simulation import SFSimulation
 import numpy as np
 
 # Graphics setup
@@ -16,43 +17,14 @@ BLACK = pygame.Color(0, 0, 0)
 WHITE = pygame.Color(255, 255, 255)
 FAIR_BLUE = pygame.Color(51, 102, 255)
 COLORADO_RED = pygame.Color(255, 102, 51)
-RADIUS = 10
+RADIUS = 0.3
 PATH_LENGTH = 200
 
 
-def init_bottleneck():
+def init_tunnel(time_step, dir_path):
+    sim = SFSimulation(time_step, dir_path)
 
-    agents = []
-    segments = [SFTunnel.Segment([100, WINDOW_HEIGHT / 2],
-                [WINDOW_WIDTH / 2 - 50, WINDOW_HEIGHT / 2]),
-                SFTunnel.Segment([WINDOW_WIDTH / 2 + 50, WINDOW_HEIGHT
-                / 2], [WINDOW_WIDTH - 100, WINDOW_HEIGHT / 2])]
-
-    # SFTunnel.Segment([100, 0], [100, WINDOW_HEIGHT/2]),
-    # SFTunnel.Segment([WINDOW_WIDTH-100, 0],[WINDOW_WIDTH-100, WINDOW_HEIGHT/2])
-
-    tunnel = SFTunnel(time_step=0.1, segments=segments)
-
-    dest = [WINDOW_WIDTH / 2, WINDOW_HEIGHT - 100]
-
-    for i in range(3):
-        for j in range(3):
-            pos = [600 + 80 * i, 200 + 40 * j]
-
-            params = {
-                'tunnel': tunnel,
-                'position': pos,
-                'destination': dest,
-                'radius': RADIUS,
-                'assumed_speed': RADIUS * 1.3,
-                'max_speed': RADIUS * 2.6,
-                'velocity': [8, 8],
-                }
-
-            agent = SFAgent(**params)
-            agents.append(agent)
-
-    return (segments, agents)
+    return (sim, sim.tunnel.segments, sim.agents)
 
 
 def init_maze():
@@ -93,49 +65,6 @@ def init_maze():
     return (segments, agents)
 
 
-def init_against(population, gap):
-
-    agents = []
-    tunnel = SFTunnel(time_step=0.1, segments=[])
-
-    for i in range(int(population / 2)):
-
-        pos = (400, 200 + gap * i)
-        dest = (WINDOW_WIDTH - 400, 200 + gap * i)
-
-        params = {
-            'tunnel': tunnel,
-            'position': pos,
-            'destination': dest,
-            'radius': RADIUS,
-            'assumed_speed': RADIUS * 1.3,
-            'max_speed': RADIUS * 2.6,
-            'velocity': [8, 8],
-            }
-
-        agent = SFAgent(**params)
-        agents.append(agent)
-
-    for i in range(int(population / 2)):
-        pos = (WINDOW_WIDTH - 400, 200 + gap * i)
-        dest = (400, 200 + gap * i)
-
-        params = {
-            'tunnel': tunnel,
-            'position': pos,
-            'destination': dest,
-            'radius': RADIUS,
-            'assumed_speed': RADIUS * 1.3,
-            'max_speed': RADIUS * 2.6,
-            'velocity': [8, 8],
-            }
-
-        agent = SFAgent(**params)
-        agents.append(agent)
-
-    return agents
-
-
 def init_circle(population):
     global RADIUS
     global WINDOW_HEIGHT
@@ -159,7 +88,7 @@ def init_circle(population):
             'radius': RADIUS,
             'assumed_speed': RADIUS * 1.3,
             'max_speed': RADIUS * 2.6,
-            'velocity': [8, 8],
+            'velocity': [0.8, 0.8],
             }
 
         agents.append(SFAgent(**params))
@@ -172,6 +101,8 @@ def init_circle(population):
 def update_agents(agents):
     for agent in agents:
         agent.update()
+
+    for agent in agents:
         agent.move()
 
 
@@ -185,47 +116,64 @@ def f(
     return int(s + int((e - s) * (t / float(duration))))
 
 
-def draw_segments(segments):
-    
+def draw_segments(segments, ratio=1):
 
     for segment in segments:
-        (s1, e1) = (int(segment.start[0]), int(segment.start[1]))
-        (s2, e2) = (int(segment.end[0]), int(segment.end[1]))
-        pygame.draw.line(background, WHITE, (s1, e1), (s2, e2), 3)
+        (s1, e1) = (ratio * int(segment.start[0]), int(ratio
+                    * segment.start[1]))
+        (s2, e2) = (ratio * int(segment.end[0]), int(ratio
+                    * segment.end[1]))
+        pygame.draw.line(background, WHITE, (s1, e1), (s2, e2), 1)
 
 
-def draw_agents(background, timespace, t):
+def draw_agents(
+    background,
+    timespace,
+    t,
+    ratio=1,
+    ):
 
     for position in timespace[t]:
 
-        pygame.gfxdraw.aacircle(background, int(position[0]),
-                                int(position[1]), int(10),
-                                pygame.Color(250, 244, 100))
-        pygame.gfxdraw.aacircle(background, int(position[0]),
-                                int(position[1]), int(9),
-                                pygame.Color(247, 237, 80))
-        pygame.gfxdraw.filled_circle(background, int(position[0]),
-                int(position[1]), int(8), BLACK)
+        pygame.gfxdraw.aacircle(background, ratio * int(position[0]),
+                                ratio * int(position[1]), int(ratio
+                                / 2) * int(1), pygame.Color(250, 244,
+                                100))
 
 
-def draw_paths(background, timespace, t):
+def draw_paths(
+    background,
+    timespace,
+    t,
+    ratio=1,
+    ):
+
     dur = PATH_LENGTH
 
     if t < dur:
         dur = t
 
-    for i in range(dur):
+    for i in range(int(dur)):
         for position in timespace[t - i]:
             r = f(223, 1, i, dur)
             g = f(202, 1, i, dur)
             b = f(6, 1, i, dur)
-            pygame.gfxdraw.aacircle(background, int(position[0]),
-                                    int(position[1]), int(1),
+            pygame.gfxdraw.aacircle(background, ratio
+                                    * int(position[0]), ratio
+                                    * int(position[1]), int(1),
                                     pygame.Color(r, g, b))
 
 
 # --------------------------------------------------------------------------------------------
-# Sim Setup
+# Setup
+
+# sim setup
+
+segments = []
+agents = []
+(sim, segments, agents) = init_tunnel(time_step=0.1, dir_path='dane')
+
+# display
 
 pygame.init()
 fps_clock = pygame.time.Clock()
@@ -240,34 +188,28 @@ background.fill(BLACK)
 window.blit(background, (0, 0))
 pygame.display.flip()
 
-segments = []
-#(segments, agents) = init_bottleneck()
-#agents = init_against(10, 80)
-#agents = init_circle(9)
-segments, agents = init_maze()
-
-# sim_data = {}
 # --------------------------------------------------------------------------------------------
 # Main Loop
 
-i = 0
 timespace = {}
-while True:
-    if i > PATH_LENGTH:
-        del timespace[i - PATH_LENGTH]
+for i in np.arange(0, 60, sim.time_step):
+
+    #if i > PATH_LENGTH:
+    #    del timespace[i - PATH_LENGTH]
 
     positions = []
     for agent in agents:
         positions.append([int(agent.position[0]),
-                         int(agent.position[1])])
+                        int(agent.position[1]), agent.dest[0]])
 
     timespace[i] = positions
     background.fill(BLACK)
-    update_agents(agents)
+    sim.simulate(i)
+    draw_segments(segments, 7)
 
-    draw_segments(segments)
-    draw_paths(background, timespace, i)
-    draw_agents(background, timespace, i)
+    #draw_paths(background, timespace, i, 7)
+
+    draw_agents(background, timespace, i, 7)
 
     for event in pygame.event.get():
         if event.type == QUIT:
