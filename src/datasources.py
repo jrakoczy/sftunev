@@ -470,7 +470,3 @@ class IncorrectDataError(Exception):
 
     pass
 
-
-if __name__ == '__main__':
-    data_src = FDSDataSource('dane')
-    print(data_src.interval_length)
